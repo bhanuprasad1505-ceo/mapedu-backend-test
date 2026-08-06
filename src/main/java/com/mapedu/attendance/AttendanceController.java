@@ -38,42 +38,81 @@ public class AttendanceController {
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> mark(@Valid @RequestBody AttendanceRequest request) {
-        Device device = deviceRepository.findById(request.deviceId())
-            .orElseThrow(() -> new IllegalArgumentException("Device not registered: " + request.deviceId()));
-        if (!device.isActive()) throw new IllegalArgumentException("Device is inactive");
-        if (!device.getSchoolCode().equals(request.schoolCode())) throw new IllegalArgumentException("Device school mismatch");
+        String deviceId = request.deviceId().trim();
+        String schoolCode = request.schoolCode().trim();
+        String cardUid = request.cardUID().trim().toUpperCase();
 
-        RfidCard card = cardRepository.findByCardUidAndActiveTrue(request.cardUID().trim().toUpperCase())
-            .orElseThrow(() -> new IllegalArgumentException("RFID card is not registered"));
-        if (!card.getSchoolCode().equals(request.schoolCode())) throw new IllegalArgumentException("Card school mismatch");
-        if (!card.getPersonId().equals(request.studentId())) throw new IllegalArgumentException("Card and person mismatch");
+        Device device = deviceRepository.findById(deviceId)
+                .orElseThrow(() -> new IllegalArgumentException("Device not registered: " + deviceId));
+        if (!device.isActive()) {
+            throw new IllegalArgumentException("Device is inactive");
+        }
+        if (!device.getSchoolCode().equals(schoolCode)) {
+            throw new IllegalArgumentException("Device school mismatch");
+        }
 
-        String type = card.getPersonType();
-        if (type.equals("STUDENT")) {
-            if (studentRepository.findById(request.studentId()).filter(s -> s.isActive() && s.getSchoolCode().equals(request.schoolCode())).isEmpty())
-                throw new IllegalArgumentException("Student is not active or not found");
-        } else if (type.equals("EMPLOYEE")) {
-            if (employeeRepository.findById(request.studentId()).filter(e -> e.isActive() && e.getSchoolCode().equals(request.schoolCode())).isEmpty())
-                throw new IllegalArgumentException("Employee is not active or not found");
+        // The RFID card is the source of truth for the person.
+        RfidCard card = cardRepository.findByCardUidAndActiveTrue(cardUid)
+                .orElseThrow(() -> new IllegalArgumentException("RFID card is not registered: " + cardUid));
+
+        if (!card.getSchoolCode().equals(schoolCode)) {
+            throw new IllegalArgumentException("Card school mismatch");
+        }
+
+        String personType = card.getPersonType();
+        String personId = card.getPersonId();
+
+        if ("STUDENT".equalsIgnoreCase(personType)) {
+            if (studentRepository.findById(personId)
+                    .filter(s -> s.isActive() && s.getSchoolCode().equals(schoolCode))
+                    .isEmpty()) {
+                throw new IllegalArgumentException("Student is not active or not found: " + personId);
+            }
+        } else if ("EMPLOYEE".equalsIgnoreCase(personType)) {
+            if (employeeRepository.findById(personId)
+                    .filter(e -> e.isActive() && e.getSchoolCode().equals(schoolCode))
+                    .isEmpty()) {
+                throw new IllegalArgumentException("Employee is not active or not found: " + personId);
+            }
+        } else {
+            throw new IllegalArgumentException("Unsupported RFID person type: " + personType);
         }
 
         String attendanceType = request.attendanceType().trim().toUpperCase();
-        if (!attendanceType.equals("IN") && !attendanceType.equals("OUT"))
+        if (!attendanceType.equals("IN") && !attendanceType.equals("OUT")) {
             throw new IllegalArgumentException("attendanceType must be IN or OUT");
+        }
 
         Instant duplicateAfter = Instant.now().minus(30, ChronoUnit.SECONDS);
-        if (attendanceRepository.existsByPersonIdAndCardUidAndAttendanceTypeAndAttendanceTimeAfter(request.studentId(), card.getCardUid(), attendanceType, duplicateAfter)) {
-            return Map.of("success", true, "duplicate", true, "message", "Duplicate attendance ignored");
+        if (attendanceRepository.existsByPersonIdAndCardUidAndAttendanceTypeAndAttendanceTimeAfter(
+                personId, card.getCardUid(), attendanceType, duplicateAfter)) {
+            return Map.of(
+                    "success", true,
+                    "duplicate", true,
+                    "message", "Duplicate attendance ignored",
+                    "personType", personType,
+                    "personId", personId,
+                    "cardUID", card.getCardUid(),
+                    "attendanceType", attendanceType
+            );
         }
 
         Attendance saved = attendanceRepository.save(new Attendance(
-            request.deviceId(), request.schoolCode(), type, request.studentId(), card.getCardUid(), attendanceType));
+                deviceId, schoolCode, personType, personId, card.getCardUid(), attendanceType));
+
         device.setLastSeen(Instant.now());
         deviceRepository.save(device);
 
-        return Map.of("success", true, "duplicate", false, "attendanceId", saved.getId(), "personType", type,
-            "personId", saved.getPersonId(), "cardUID", saved.getCardUid(), "attendanceType", saved.getAttendanceType(),
-            "attendanceTime", saved.getAttendanceTime());
+        return Map.of(
+                "success", true,
+                "duplicate", false,
+                "attendanceId", saved.getId(),
+                "personType", personType,
+                "personId", saved.getPersonId(),
+                "cardUID", saved.getCardUid(),
+                "attendanceType", saved.getAttendanceType(),
+                "attendanceTime", saved.getAttendanceTime()
+        );
     }
 
     @GetMapping
@@ -87,10 +126,9 @@ public class AttendanceController {
     }
 
     public record AttendanceRequest(
-        @NotBlank String deviceId,
-        @NotBlank String schoolCode,
-        @NotBlank String studentId,
-        @NotBlank String cardUID,
-        @NotBlank String attendanceType
+            @NotBlank String deviceId,
+            @NotBlank String schoolCode,
+            @NotBlank String cardUID,
+            @NotBlank String attendanceType
     ) {}
 }
